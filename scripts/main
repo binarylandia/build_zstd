@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+
+NAME="zstd"
+REPO_URL="https://github.com/facebook/zstd"
+VERSION="1.5.6"
+
+BUILD_DIR=".build"
+INSTALL_DIR="/opt/${NAME}"
+OUT_DIR=".out"
+
+NICE="nice -19 ionice -c2 -n5"
+JOBS="${JOBS:=$(($(nproc --all) + 2))}"
+
+build_time="$(date '+%Y%m%d%H%M%S')"
+
+export CFLAGS="-w -g0 -O3 ${CFLAGS:-}"
+export CXXFLAGS="-w -g0 -O3 ${CXXFLAGS:-}"
+export LDFLAGS="-s ${LDFLAGS:-}"
+
+export CFLAGS="-static-libgcc -static-libstdc++ ${CFLAGS:-}"
+export CXXFLAGS="-static-libgcc -static-libstdc++ ${CXXFLAGS:-}"
+export LDFLAGS="-static-libgcc -static-libstdc++ ${LDFLAGS:-}"
+
+export CFLAGS="-fPIC ${CFLAGS:-}"
+export CXXFLAGS="-fPIC ${CXXFLAGS:-}"
+export LDFLAGS="-fPIC ${LDFLAGS:-}"
+
+function abspath() {
+  readlink -m "$1"
+}
+
+function log() {
+  tee -a "${1}" | stdbuf -oL grep --color=always -iE "error|fail|cannot|can't|unable|"
+}
+
+function package() {
+  local input_dir="${1}"
+  local output_tarball="${2}"
+
+  ${NICE} find "${input_dir}" -printf "%P\n" \
+    | ${NICE} tar --no-recursion -cf - -C "${input_dir}" --files-from=- \
+    | ${NICE} xz -T0 -k > "${output_tarball}"
+}
+
+build_dir="$(abspath ${BUILD_DIR})"
+mkdir -p "${build_dir}"
+outdir="$(abspath "${OUT_DIR}")"
+mkdir -p "${outdir}"
+
+pushd "$build_dir" >/dev/null
+  src_dir="${NAME}-${VERSION}"
+
+  if [ ! -d "${src_dir}" ]; then
+    mkdir -p "${src_dir}"
+    curl -fsSL "https://github.com/facebook/zstd/releases/download/v${VERSION}/zstd-${VERSION}.tar.gz" | tar --strip-components=1 -C "${src_dir}" -xz
+  fi
+
+  pushd "${src_dir}" >/dev/null
+    ${NICE} cmake -S "build/cmake" -B "build" \
+      -LAH -Wno-dev -Wno-deprecated \
+      -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
+      -DCMAKE_BUILD_TYPE="Release" \
+      -DCMAKE_COLOR_MAKEFILE="OFF" \
+      -DCMAKE_VERBOSE_MAKEFILE="OFF" \
+      \
+      -DCMAKE_INSTALL_LIBDIR="lib" \
+      \
+      -DZSTD_BUILD_CONTRIB="ON" \
+      -DZSTD_BUILD_SHARED="OFF" \
+      \
+      2>&1 | log "build.log"
+
+    ${NICE} cmake --build "build" --parallel="${JOBS}" 2>&1 | log "build.log"
+
+    ${NICE} cmake --install "build" 2>&1 | log "build.log"
+
+    sed -i "s|prefix=${INSTALL_DIR}|prefix=\$\{pcfiledir\}/../..|g" "${INSTALL_DIR}/lib/pkgconfig/libzstd.pc"
+
+    cp "build.log" "${INSTALL_DIR}/"
+
+    package "${INSTALL_DIR}" "${outdir}/${NAME}-${VERSION}-static-${build_time}.tar.xz"
+  popd >/dev/null
+popd >/dev/null
+
